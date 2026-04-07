@@ -3,13 +3,25 @@ import joblib
 import re
 import os
 import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
+import onnxruntime as ort
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pandas as pd
 from datetime import datetime, timedelta
 import random
+
+
+def _pad_sequences(sequences, maxlen, padding='post'):
+    """Minimal pad_sequences replacement (no TF needed)."""
+    result = np.zeros((len(sequences), maxlen), dtype=np.float32)
+    for i, seq in enumerate(sequences):
+        if padding == 'post':
+            length = min(len(seq), maxlen)
+            result[i, :length] = seq[:length]
+        else:
+            length = min(len(seq), maxlen)
+            result[i, maxlen - length:] = seq[:length]
+    return result
 
 
 # ─── Base Path ─────────────────────────────────────────────────
@@ -385,13 +397,16 @@ footer { visibility: hidden; }
 # ─── Load Models ───────────────────────────────────────────────
 @st.cache_resource
 def load_models():
-    lr_model   = joblib.load(os.path.join(BASE_DIR, 'models', 'logistic_regression_model.pkl'))
-    tfidf      = joblib.load(os.path.join(BASE_DIR, 'models', 'tfidf_vectorizer.pkl'))
-    lstm_model = load_model(os.path.join(BASE_DIR, 'models', 'lstm_model.keras'))
-    tokenizer  = joblib.load(os.path.join(BASE_DIR, 'models', 'lstm_tokenizer.pkl'))
-    return lr_model, tfidf, lstm_model, tokenizer
+    lr_model  = joblib.load(os.path.join(BASE_DIR, 'models', 'logistic_regression_model.pkl'))
+    tfidf     = joblib.load(os.path.join(BASE_DIR, 'models', 'tfidf_vectorizer.pkl'))
+    sess      = ort.InferenceSession(
+                    os.path.join(BASE_DIR, 'models', 'lstm_model.onnx'),
+                    providers=['CPUExecutionProvider']
+                )
+    tokenizer = joblib.load(os.path.join(BASE_DIR, 'models', 'lstm_tokenizer.pkl'))
+    return lr_model, tfidf, sess, tokenizer
 
-lr_model, tfidf, lstm_model, tokenizer = load_models()
+lr_model, tfidf, lstm_sess, tokenizer = load_models()
 
 # ─── Helpers ───────────────────────────────────────────────────
 def clean_tweet(text):
@@ -415,10 +430,12 @@ def predict_lr(tweet):
 def predict_lstm(tweet):
     cleaned = clean_tweet(tweet)
     seq    = tokenizer.texts_to_sequences([cleaned])
-    padded = pad_sequences(seq, maxlen=50, padding='post')
-    prob   = float(lstm_model.predict(padded, verbose=0)[0][0])
-    pred   = 1 if prob > 0.5 else 0
-    conf   = prob if prob > 0.5 else 1 - prob
+    padded = _pad_sequences(seq, maxlen=50, padding='post')  # shape (1, 50)
+    input_name = lstm_sess.get_inputs()[0].name
+    raw = lstm_sess.run(None, {input_name: padded})[0]        # shape (1, 1)
+    prob = float(raw[0][0])
+    pred = 1 if prob > 0.5 else 0
+    conf = prob if prob > 0.5 else 1 - prob
     return pred, conf
 
 # ─── Chart helpers ─────────────────────────────────────────────
